@@ -1,0 +1,457 @@
+import cv2
+import time
+import csv
+import os
+import numpy as np
+from ultralytics import YOLO
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+VIDEO_PATH = "input/traffic.mp4"
+MODEL_PATH = "yolov8n.pt"
+
+OUTPUT_VIDEO = "results/detected_output.mp4"
+OUTPUT_CSV = "results/performance_metrics.csv"
+
+CONFIDENCE = 0.40
+
+# CPU optimization
+IMAGE_SIZE = 512
+
+LATENCY_LIMIT = 100.0
+
+# Warm-up frames
+WARMUP_FRAMES = 10
+
+
+# ============================================================
+# CREATE RESULTS FOLDER
+# ============================================================
+
+os.makedirs("results", exist_ok=True)
+
+
+# ============================================================
+# LOAD YOLO MODEL
+# ============================================================
+
+print("\nLoading YOLO model...")
+
+model = YOLO(MODEL_PATH)
+
+print("YOLO model loaded successfully.")
+
+
+# ============================================================
+# OPEN VIDEO
+# ============================================================
+
+print("\nOpening video...")
+
+cap = cv2.VideoCapture(VIDEO_PATH)
+
+if not cap.isOpened():
+    print("ERROR: Could not open video.")
+    print("Check VIDEO_PATH:", VIDEO_PATH)
+    exit()
+
+    
+# Video information
+width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+source_fps = cap.get(cv2.CAP_PROP_FPS)
+total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+duration = total_frames / source_fps if source_fps > 0 else 0
+
+
+print("\n==========================================")
+print("          VIDEO INFORMATION")
+print("==========================================")
+print(f"Resolution       : {width} x {height}")
+print(f"Source FPS       : {source_fps:.2f}")
+print(f"Total Frames     : {total_frames}")
+print(f"Duration         : {duration:.2f} seconds")
+print(f"YOLO Image Size  : {IMAGE_SIZE} x {IMAGE_SIZE}")
+print("Inference Device  : CPU")
+print("==========================================")
+
+
+# ============================================================
+# VIDEO WRITER
+# ============================================================
+
+fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+
+out = cv2.VideoWriter(
+    OUTPUT_VIDEO,
+    fourcc,
+    source_fps,
+    (width, height)
+)
+
+if not out.isOpened():
+    print("ERROR: Could not create output video.")
+    cap.release()
+    exit()
+
+
+# ============================================================
+# WARM-UP
+# ============================================================
+
+print("\nPerforming YOLO warm-up...")
+
+for i in range(WARMUP_FRAMES):
+
+    ret, frame = cap.read()
+
+    if not ret:
+        break
+
+    model(
+        frame,
+        imgsz=IMAGE_SIZE,
+        conf=CONFIDENCE,
+        verbose=False,
+        device="cpu"
+    )
+
+print(f"Warm-up completed: {WARMUP_FRAMES} frames")
+
+
+# ============================================================
+# RESET VIDEO
+# ============================================================
+
+cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+
+# ============================================================
+# BENCHMARK
+# ============================================================
+
+print("\nStarting benchmark...")
+print("Press Q to stop.\n")
+
+
+latencies = []
+object_counts = []
+
+frame_number = 0
+
+
+while True:
+
+    ret, frame = cap.read()
+
+    if not ret:
+        break
+
+    frame_number += 1
+
+
+    # --------------------------------------------------------
+    # START INFERENCE TIMER
+    # --------------------------------------------------------
+
+    start_time = time.perf_counter()
+
+
+    results = model(
+        frame,
+        imgsz=IMAGE_SIZE,
+        conf=CONFIDENCE,
+        verbose=False,
+        device="cpu"
+    )
+
+
+    end_time = time.perf_counter()
+
+
+    # --------------------------------------------------------
+    # CALCULATE LATENCY
+    # --------------------------------------------------------
+
+    latency = (end_time - start_time) * 1000
+
+    latencies.append(latency)
+
+
+    # --------------------------------------------------------
+    # COUNT DETECTED OBJECTS
+    # --------------------------------------------------------
+
+    object_count = 0
+
+    if results[0].boxes is not None:
+        object_count = len(results[0].boxes)
+
+
+    object_counts.append(object_count)
+
+
+    # --------------------------------------------------------
+    # ANNOTATED FRAME
+    # --------------------------------------------------------
+
+    annotated_frame = results[0].plot()
+
+
+    # --------------------------------------------------------
+    # FPS
+    # --------------------------------------------------------
+
+    inference_fps = 1000 / latency if latency > 0 else 0
+
+
+    # --------------------------------------------------------
+    # PASS / FAIL
+    # --------------------------------------------------------
+
+    status = "PASS" if latency <= LATENCY_LIMIT else "FAIL"
+
+
+    # --------------------------------------------------------
+    # DISPLAY PERFORMANCE
+    # --------------------------------------------------------
+
+    cv2.putText(
+        annotated_frame,
+        f"Latency: {latency:.2f} ms",
+        (20, 35),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (0, 255, 0) if status == "PASS" else (0, 0, 255),
+        2
+    )
+
+    cv2.putText(
+        annotated_frame,
+        f"FPS: {inference_fps:.2f}",
+        (20, 70),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (255, 255, 0),
+        2
+    )
+
+    cv2.putText(
+        annotated_frame,
+        f"Objects: {object_count}",
+        (20, 105),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (255, 255, 0),
+        2
+    )
+
+    cv2.putText(
+        annotated_frame,
+        f"Requirement: {status}",
+        (20, 140),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (0, 255, 0) if status == "PASS" else (0, 0, 255),
+        2
+    )
+
+
+    # --------------------------------------------------------
+    # SAVE FRAME
+    # --------------------------------------------------------
+
+    out.write(annotated_frame)
+
+
+    # --------------------------------------------------------
+    # SHOW FRAME
+    # --------------------------------------------------------
+
+    cv2.imshow("Smart City YOLO Detection", annotated_frame)
+
+
+    # --------------------------------------------------------
+    # PROGRESS
+    # --------------------------------------------------------
+
+    if frame_number % 30 == 0:
+
+        print(
+            f"Frame {frame_number}/{total_frames} | "
+            f"Latency {latency:.2f} ms | "
+            f"FPS {inference_fps:.2f} | "
+            f"Objects {object_count} | "
+            f"{status}"
+        )
+
+
+    # --------------------------------------------------------
+    # PRESS Q TO EXIT
+    # --------------------------------------------------------
+
+    key = cv2.waitKey(1) & 0xFF
+
+    if key == ord("q"):
+        print("\nBenchmark stopped by user.")
+        break
+
+
+# ============================================================
+# RELEASE RESOURCES
+# ============================================================
+
+cap.release()
+out.release()
+cv2.destroyAllWindows()
+
+
+# ============================================================
+# PERFORMANCE ANALYSIS
+# ============================================================
+
+if len(latencies) == 0:
+
+    print("No frames were processed.")
+    exit()
+
+
+latencies_np = np.array(latencies)
+
+
+average_latency = np.mean(latencies_np)
+
+minimum_latency = np.min(latencies_np)
+
+maximum_latency = np.max(latencies_np)
+
+median_latency = np.median(latencies_np)
+
+p50_latency = np.percentile(latencies_np, 50)
+
+p95_latency = np.percentile(latencies_np, 95)
+
+p99_latency = np.percentile(latencies_np, 99)
+
+average_fps = 1000 / average_latency
+
+average_objects = np.mean(object_counts)
+
+
+# ============================================================
+# PASS / FAIL
+# ============================================================
+
+pass_frames = np.sum(latencies_np <= LATENCY_LIMIT)
+
+fail_frames = np.sum(latencies_np > LATENCY_LIMIT)
+
+pass_percentage = (pass_frames / len(latencies_np)) * 100
+
+fail_percentage = (fail_frames / len(latencies_np)) * 100
+
+
+requirement_status = (
+    "PASS"
+    if average_latency <= LATENCY_LIMIT
+    else "FAIL"
+)
+
+
+# ============================================================
+# PRINT RESULTS
+# ============================================================
+
+print("\n")
+print("=" * 65)
+print("          SMART CITY YOLO PERFORMANCE")
+print("=" * 65)
+
+print(f"Frames benchmarked      : {len(latencies)}")
+print(f"Warm-up frames excluded : {WARMUP_FRAMES}")
+
+print(f"Average latency         : {average_latency:.2f} ms")
+print(f"Minimum latency         : {minimum_latency:.2f} ms")
+print(f"Maximum latency         : {maximum_latency:.2f} ms")
+
+print(f"Median latency          : {median_latency:.2f} ms")
+
+print(f"P50 latency             : {p50_latency:.2f} ms")
+print(f"P95 latency             : {p95_latency:.2f} ms")
+print(f"P99 latency             : {p99_latency:.2f} ms")
+
+print(f"Average inference FPS   : {average_fps:.2f}")
+
+print(f"Average objects/frame   : {average_objects:.2f}")
+
+print("-" * 65)
+
+print(f"PASS frames             : {pass_frames}")
+print(f"FAIL frames             : {fail_frames}")
+
+print(f"PASS percentage         : {pass_percentage:.2f}%")
+print(f"FAIL percentage         : {fail_percentage:.2f}%")
+
+print("-" * 65)
+
+print(
+    f"LATENCY REQUIREMENT: {requirement_status}"
+)
+
+print("=" * 65)
+
+
+# ============================================================
+# SAVE CSV
+# ============================================================
+
+with open(
+    OUTPUT_CSV,
+    "w",
+    newline=""
+) as csvfile:
+
+    writer = csv.writer(csvfile)
+
+    writer.writerow([
+        "Frame",
+        "Latency_ms",
+        "FPS",
+        "Objects",
+        "Status"
+    ])
+
+
+    for i in range(len(latencies)):
+
+        latency = latencies[i]
+
+        fps = 1000 / latency if latency > 0 else 0
+
+        objects = object_counts[i]
+
+        status = (
+            "PASS"
+            if latency <= LATENCY_LIMIT
+            else "FAIL"
+        )
+
+        writer.writerow([
+            i + 1,
+            f"{latency:.4f}",
+            f"{fps:.4f}",
+            objects,
+            status
+        ])
+
+
+print("\nPerformance CSV saved:")
+print(os.path.abspath(OUTPUT_CSV))
+
+
+print("\nProcessed video saved:")
+print(os.path.abspath(OUTPUT_VIDEO))
